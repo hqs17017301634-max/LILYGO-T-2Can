@@ -191,6 +191,12 @@ static void t2canDrainSecondary()
         f.bus = T2CAN_SECONDARY_BUS;
         t2canSecondaryRxCount = t2canSecondaryRxCount + 1;
         t2canRecordBus2(f);
+#ifdef ESP32_DASHBOARD
+        // Also feed bus2 frames into the CSV recorder (with bus column) so a
+        // timestamped sequential capture of X197 9/10 can be downloaded for
+        // offline checksum/counter reverse-engineering (0x249/0x3E9/0x3F5).
+        dashRecordCanFrame(f, 'R');
+#endif
     }
 }
 

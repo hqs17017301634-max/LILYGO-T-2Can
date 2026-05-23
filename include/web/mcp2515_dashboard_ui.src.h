@@ -367,6 +367,9 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
     <thead><tr><th class="task-name">ID</th><th class="task-core">DLC</th><th class="task-cpu">count</th><th class="task-state">last data</th></tr></thead>
     <tbody id="bus2-rows"><tr><td colspan="4" class="v-dim">waiting&hellip;</td></tr></tbody>
   </table>
+  <div class="sniff-ctrl" style="margin-top:8px">
+    <button class="sniff-btn" onclick="startRec('249,3E9,3F5')" title="Start a filtered recording that captures only the Tesla lighting/stalk frames (0x249 stalk, 0x3E9 DAS body controls, 0x3F5 lighting status) on both buses. Operate the stalk / drive in FSD, then Stop and Download CSV in the CAN section ▸ Recorder for offline checksum and counter analysis.">Capture lighting IDs (249/3E9/3F5)</button>
+  </div>
 </div>
 
 <div class="card">
@@ -887,7 +890,7 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
 <span class="ok">&#x2705;</span> &#x81EA;&#x5B9A;&#x4E49;&#x9650;&#x901F;
 
 Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-23 13:04:46 +08:00</div>
+OTA timestamp: 2026-05-23 21:47:24 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOwnerNotice()">&#x77E5;&#x9053;&#x4E86;</button>
     </div>
@@ -909,7 +912,7 @@ OTA timestamp: 2026-05-23 13:04:46 +08:00</div>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ota-test-title">
     <div class="modal-title" id="ota-test-title">OTA Test v2</div>
     <div class="modal-msg" id="ota-test-msg">Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-23 13:04:46 +08:00</div>
+OTA timestamp: 2026-05-23 21:47:24 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOtaTestNotice()">Close</button>
     </div>
@@ -1207,7 +1210,7 @@ Object.assign(I18N_ZH,{
   '80/100/120 km/h buckets. Max target: 120/150/155 km/h.':'80/100/120 km/h \u5206\u6bb5\u3002\u76ee\u6807\u4e0a\u9650\uff1a120/150/155 km/h\u3002',
   'Profiles are available on Legacy, HW3 and HW4.':'Legacy\u3001HW3 \u548c HW4 \u652f\u6301\u914d\u7f6e\u6863\u3002',
   'OTA Test v2':'OTA \u6d4b\u8bd5 v2',
-  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-23 13:04:46 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-23 13:04:46 +08:00',
+  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-23 21:47:24 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-23 21:47:24 +08:00',
   'AP':'AP',
   'STA':'STA',
   'DNS':'DNS',
@@ -2547,9 +2550,9 @@ async function resetStats(){try{await fetch('/reset_stats',{method:'POST'});}cat
 
 let recIsActive=false,recInterval=null;
 async function toggleRec(){recIsActive?await stopRec():await startRec();}
-async function startRec(){
+async function startRec(ids){
   try{
-    await fetch('/rec_start',{method:'POST'});
+    await fetch('/rec_start'+(ids?('?ids='+encodeURIComponent(ids)):''),{method:'POST'});
     recIsActive=true;
     const b=$('rec-btn');
     b.textContent='Stop Recording';

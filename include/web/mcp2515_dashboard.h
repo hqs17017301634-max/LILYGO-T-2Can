@@ -233,6 +233,7 @@ struct RecFrame
     char dir;
     uint32_t id;
     uint8_t dlc;
+    uint8_t bus;
     uint8_t data[8];
 };
 static RecFrame *recBuf = nullptr;
@@ -241,6 +242,14 @@ static volatile bool recActive = false;
 static volatile int recCount = 0;
 static bool recSaved = false;
 static unsigned long recStartMs = 0;
+
+// Optional capture filter: when recFilterCount > 0, only frames whose ID is in
+// recFilterIds are recorded. Empty (0) = record everything (default behaviour).
+// Lets you capture just the lighting/stalk IDs (0x249/0x3E9/0x3F5) over a long
+// window without the busy primary bus flooding the buffer.
+static constexpr int kRecFilterMax = 16;
+static uint32_t recFilterIds[kRecFilterMax];
+static int recFilterCount = 0;
 
 // CAN sniffer ring buffer
 #define SNIFFER_CAP 30
@@ -411,14 +420,16 @@ static bool dashSaveRecordingToSpiffs(int n)
         return false;
     }
 
-    f.println("ts_ms,dir,id,dlc,b0,b1,b2,b3,b4,b5,b6,b7");
+    // bus: 2 = secondary MCP2515 (X197 9/10), 1 = primary TWAI (X197 13/14)
+    f.println("ts_ms,dir,bus,id,dlc,b0,b1,b2,b3,b4,b5,b6,b7");
     char line[96];
     for (int i = 0; i < n; i++)
     {
         int len = snprintf(line, sizeof(line),
-                           "%lu,%c,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+                           "%lu,%c,%u,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
                            recBuf[i].ts,
                            recBuf[i].dir ? recBuf[i].dir : 'R',
+                           static_cast<unsigned>(recBuf[i].bus == CAN_BUS_PARTY ? 2 : 1),
                            static_cast<unsigned long>(recBuf[i].id),
                            static_cast<unsigned>(recBuf[i].dlc),
                            static_cast<unsigned>(recBuf[i].data[0]),
@@ -455,6 +466,21 @@ static void dashRecordCanFrame(const CanFrame &f, char dir)
 {
     if (!recActive || !recBuf)
         return;
+    if (recFilterCount > 0)
+    {
+        bool match = false;
+        uint32_t fid = f.id & 0x1FFFFFFFUL;
+        for (int k = 0; k < recFilterCount; k++)
+        {
+            if (recFilterIds[k] == fid)
+            {
+                match = true;
+                break;
+            }
+        }
+        if (!match)
+            return;
+    }
     int idx = recCount;
     if (idx >= REC_CAP)
         return;
@@ -463,6 +489,7 @@ static void dashRecordCanFrame(const CanFrame &f, char dir)
     recBuf[idx].dir = dir;
     recBuf[idx].id = f.id;
     recBuf[idx].dlc = dlc;
+    recBuf[idx].bus = f.bus;
     memset(recBuf[idx].data, 0, sizeof(recBuf[idx].data));
     memcpy(recBuf[idx].data, f.data, dlc);
     recCount = idx + 1;
@@ -1770,11 +1797,35 @@ static void handleRecStart()
         server.send(500, "application/json", "{\"ok\":false,\"error\":\"recorder buffer allocation failed\"}");
         return;
     }
+    // Optional ID filter: /rec/start?ids=249,3E9,3F5 (hex, comma-separated).
+    // Records only those IDs (on any bus) so the busy primary bus does not flood
+    // the buffer while you capture lighting/stalk frames for checksum analysis.
+    recFilterCount = 0;
+    if (server.hasArg("ids"))
+    {
+        String s = server.arg("ids");
+        const char *p = s.c_str();
+        while (*p && recFilterCount < kRecFilterMax)
+        {
+            while (*p == ',' || *p == ' ')
+                p++;
+            if (!*p)
+                break;
+            char *end = nullptr;
+            uint32_t v = static_cast<uint32_t>(strtoul(p, &end, 16));
+            if (end == p)
+                break; // no progress: avoid infinite loop on junk input
+            recFilterIds[recFilterCount++] = v;
+            p = end;
+        }
+    }
     recCount = 0;
     recSaved = false;
     recStartMs = millis();
     recActive = true;
-    dashLog("[REC] Recording started");
+    dashLog(recFilterCount > 0
+                ? String("[REC] Recording started (filter ") + recFilterCount + " ids)"
+                : String("[REC] Recording started"));
     server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1798,6 +1849,8 @@ static void handleRecStatus()
     j += recSaved ? "true" : "false";
     j += ",\"psram\":";
     j += recBufInPsram ? "true" : "false";
+    j += ",\"filter\":";
+    j += recFilterCount;
     j += "}";
     server.send(200, "application/json", j);
 }
