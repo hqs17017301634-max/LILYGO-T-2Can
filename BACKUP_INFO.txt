@@ -1,0 +1,19 @@
+﻿IDF WebUI宽度自适应版 源码备份
+备份时间: 2026-05-15 14:36:25
+来源目录: C:\Users\Administrator\Desktop\FSD-CAN\AAA-ESP32S3\IDF-DNS-AP-NAT
+备份目录: C:\Users\Administrator\Desktop\FSD-CAN\AAA-ESP32S3\源码备份-IDF-WebUI宽度自适应版-20260515-143622
+文件数: 1552
+
+包含当前主要修改:
+- FSD 单按钮：英文/中文按语言显示开启/关闭
+- 温度 °C 显示修复
+- 英文 CAN Debug 反向翻译修复
+- WebUI 桌面/车机 90% 宽度自适应，最大 1180px，居中
+- Legacy 自定义限速 UI 显示修复
+- 当前 CAN 稳定灰轮 / AP Gate 旁路 / post-handler original-frame 逻辑
+
+已排除:
+- .pio
+- .git
+- compile_commands.json
+- *.pyc
