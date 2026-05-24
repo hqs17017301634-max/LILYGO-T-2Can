@@ -139,11 +139,17 @@ static constexpr uint16_t kT2canBus2MaxIds = 160;
 static T2canBus2Id g_bus2Ids[kT2canBus2MaxIds];
 static volatile uint16_t g_bus2IdCount = 0;
 
+// Latest rolling counter seen on the real 0x249 SCCMLeftStalk stream, so an
+// injected test frame can ride just after it with the next counter value.
+static volatile uint8_t g_stalkLastCounter = 0;
+
 static void t2canRecordBus2(const CanFrame &f)
 {
     if (f.id & 0x80000000UL)
         return; // standard 11-bit IDs only (Tesla lighting/stalk are standard)
     uint16_t sid = (uint16_t)(f.id & 0x7FF);
+    if (sid == 0x249 && f.dlc >= 2)
+        g_stalkLastCounter = f.data[1] & 0x0F; // track real stalk counter
     uint16_t n = g_bus2IdCount;
     for (uint16_t i = 0; i < n; i++)
     {
@@ -223,6 +229,60 @@ static void t2canServiceModeTick()
     f.data[5] = 0xE0;
     f.bus = T2CAN_SECONDARY_BUS;
     appDriverSecondary->send(f);
+}
+
+// ── Stalk injection test (0x249 SCCMLeftStalk on bus B / X197 9/10) ──
+// CRC reverse-engineered from a 2023.11 Model Y HW3 capture (846/846 verified):
+//   b0 = BASE[counter] XOR OFFSET[status]   (valid while b2=b3=0)
+// status: 1=PULL (flash/超车闪), 2=PUSH (high-beam toggle/远光). See
+// docs/stalk_0x249_crc_solved_zh.md. Tests whether plain injection (no MITM)
+// can drive the lights despite the genuine SCCM also transmitting 0x249.
+static const uint8_t kStalkBase[16] = {
+    0x9B, 0xE8, 0x2A, 0xD3, 0xD3, 0x83, 0x4C, 0x5E,
+    0x3F, 0x5E, 0xE2, 0x28, 0x3A, 0x13, 0xAF, 0xCE};
+static inline uint8_t t2canStalkCrc(uint8_t counter, uint8_t status)
+{
+    static const uint8_t off[8] = {0x00, 0x76, 0xEC, 0x00, 0xF7, 0x00, 0x00, 0x00};
+    return kStalkBase[counter & 0x0F] ^ off[status & 0x07];
+}
+
+static volatile uint8_t g_stalkInjStatus = 0;  // 0=off, 1=PULL, 2=PUSH
+static volatile uint32_t g_stalkInjUntil = 0;  // millis() deadline
+
+void t2canStalkTest(uint8_t status, uint16_t durationMs)
+{
+    g_stalkInjStatus = status;
+    g_stalkInjUntil = millis() + durationMs;
+}
+
+static void t2canStalkInjectTick()
+{
+    if (!appDriverSecondary || g_stalkInjStatus == 0)
+        return;
+    uint32_t now = millis();
+    if ((int32_t)(now - g_stalkInjUntil) >= 0)
+    {
+        g_stalkInjStatus = 0;
+        return;
+    }
+    static uint32_t last = 0;
+    if (now - last < 50) // match real 0x249 cadence (~20Hz)
+        return;
+    last = now;
+    uint8_t st = g_stalkInjStatus;
+    uint8_t cnt = (g_stalkLastCounter + 1) & 0x0F; // ride after newest real frame
+    CanFrame f = {};
+    f.id = 0x249;
+    f.dlc = 4;
+    f.data[0] = t2canStalkCrc(cnt, st);
+    f.data[1] = (uint8_t)((st << 4) | cnt);
+    f.data[2] = 0;
+    f.data[3] = 0;
+    f.bus = T2CAN_SECONDARY_BUS;
+    appDriverSecondary->send(f);
+#ifdef ESP32_DASHBOARD
+    dashRecordCanFrame(f, 'T');
+#endif
 }
 #endif
 
@@ -319,6 +379,7 @@ static void app_can_task(void *)
 #ifdef DRIVER_T2CAN_DUAL
         t2canDrainSecondary();
         t2canServiceModeTick();
+        t2canStalkInjectTick();
 #endif
         appCanTaskLoops = appCanTaskLoops + 1;
         if (!processed)

@@ -1862,6 +1862,7 @@ void t2canSetServiceMode(bool on);
 bool t2canGetServiceMode(void);
 uint16_t t2canBus2IdCount(void);
 bool t2canBus2IdAt(uint16_t i, uint16_t *id, uint8_t *dlc, uint8_t *data, uint32_t *count);
+void t2canStalkTest(uint8_t status, uint16_t durationMs); // status 1=PULL flash, 2=PUSH high beam
 
 static void handleServiceMode()
 {
@@ -1869,6 +1870,30 @@ static void handleServiceMode()
         t2canSetServiceMode(server.arg("on") == "1");
     server.send(200, "application/json",
                 String("{\"service_mode\":") + (t2canGetServiceMode() ? "true" : "false") + "}");
+}
+
+// Inject a short 0x249 stalk burst on bus B to test manual lighting:
+//   /stalk_test?mode=flash     -> PULL (超车闪)  ~400ms
+//   /stalk_test?mode=highbeam  -> PUSH (远光toggle) ~1000ms
+static void handleStalkTest()
+{
+    String m = server.hasArg("mode") ? server.arg("mode") : "";
+    uint8_t status = 0;
+    uint16_t dur = 0;
+    if (m == "highbeam")
+    {
+        status = 2;
+        dur = 1000;
+    }
+    else if (m == "flash")
+    {
+        status = 1;
+        dur = 400;
+    }
+    if (status)
+        t2canStalkTest(status, dur);
+    server.send(200, "application/json",
+                String("{\"ok\":") + (status ? "true" : "false") + ",\"mode\":\"" + m + "\"}");
 }
 
 static void handleBus2Ids()
@@ -4386,6 +4411,7 @@ static void mcpDashboardSetup(CarManagerBase *handler, CanDriver *driver)
     server.on("/rec_status", HTTP_GET, handleRecStatus);
 #ifdef DRIVER_T2CAN_DUAL
     server.on("/service_mode", HTTP_GET, handleServiceMode);
+    server.on("/stalk_test", HTTP_GET, handleStalkTest);
     server.on("/bus2_ids", HTTP_GET, handleBus2Ids);
 #endif
     server.on("/rec_download", HTTP_GET, handleRecDownload);

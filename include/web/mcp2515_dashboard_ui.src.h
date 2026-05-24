@@ -374,6 +374,21 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
 
 <div class="card">
   <div class="card-hdr">
+    <div class="card-title">Lighting / Stalk Test (bus2) <span class="title-help" aria-label="Help" onclick="return toggleHelp(this,event)" title="Injects 0x249 SCCMLeftStalk frames on bus2 (X197 9/10) with the reverse-engineered CRC to test whether high beam (PUSH) and flash-to-pass (PULL) can be activated by injection. The genuine SCCM also sends 0x249, so this is the injection-vs-MITM test. Service Mode injects 0x339 continuously.">i</span></div>
+    <div class="card-meta" id="stalk-status">idle</div>
+  </div>
+  <div class="sniff-ctrl">
+    <button class="sniff-btn" onclick="stalkTest('flash')" title="Inject 0x249 PULL (status 1) for ~400ms — flash-to-pass / 超车灯">超车灯 Flash (PULL)</button>
+    <button class="sniff-btn" onclick="stalkTest('highbeam')" title="Inject 0x249 PUSH (status 2) for ~1s — high beam toggle / 远光灯">远光灯 High Beam (PUSH)</button>
+  </div>
+  <div class="sniff-ctrl" style="margin-top:8px;align-items:center">
+    <span style="font-size:12px;color:var(--tx2)">维修模式 Service Mode (0x339)</span>
+    <button class="sniff-btn" id="svc-btn" onclick="toggleServiceMode()">OFF</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-hdr">
     <div class="card-title">Configuration <span class="title-help" aria-label="Help" onclick="return toggleHelp(this,event)" title="Device settings for hardware mode, WiFi, CAN pins, logging and backup.">i</span></div>
     <div class="card-meta">Device settings</div>
   </div>
@@ -890,7 +905,7 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
 <span class="ok">&#x2705;</span> &#x81EA;&#x5B9A;&#x4E49;&#x9650;&#x901F;
 
 Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-23 21:47:24 +08:00</div>
+OTA timestamp: 2026-05-24 23:21:43 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOwnerNotice()">&#x77E5;&#x9053;&#x4E86;</button>
     </div>
@@ -912,7 +927,7 @@ OTA timestamp: 2026-05-23 21:47:24 +08:00</div>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ota-test-title">
     <div class="modal-title" id="ota-test-title">OTA Test v2</div>
     <div class="modal-msg" id="ota-test-msg">Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-23 21:47:24 +08:00</div>
+OTA timestamp: 2026-05-24 23:21:43 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOtaTestNotice()">Close</button>
     </div>
@@ -1210,7 +1225,7 @@ Object.assign(I18N_ZH,{
   '80/100/120 km/h buckets. Max target: 120/150/155 km/h.':'80/100/120 km/h \u5206\u6bb5\u3002\u76ee\u6807\u4e0a\u9650\uff1a120/150/155 km/h\u3002',
   'Profiles are available on Legacy, HW3 and HW4.':'Legacy\u3001HW3 \u548c HW4 \u652f\u6301\u914d\u7f6e\u6863\u3002',
   'OTA Test v2':'OTA \u6d4b\u8bd5 v2',
-  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-23 21:47:24 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-23 21:47:24 +08:00',
+  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-24 23:21:43 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-24 23:21:43 +08:00',
   'AP':'AP',
   'STA':'STA',
   'DNS':'DNS',
@@ -2549,6 +2564,19 @@ async function pollLog(){
 async function resetStats(){try{await fetch('/reset_stats',{method:'POST'});}catch(e){}poll();}
 
 let recIsActive=false,recInterval=null;
+async function stalkTest(mode){
+  const s=$('stalk-status');
+  if(s){s.textContent=mode+'…';}
+  try{await fetch('/stalk_test?mode='+encodeURIComponent(mode));
+    if(s){s.textContent=mode+' sent';setTimeout(()=>{if(s)s.textContent='idle';},1800);}
+  }catch(e){if(s)s.textContent='error';}
+}
+let svcOn=false;
+async function toggleServiceMode(){
+  svcOn=!svcOn;
+  try{const r=await(await fetch('/service_mode?on='+(svcOn?1:0))).json();svcOn=!!r.service_mode;}catch(e){}
+  const b=$('svc-btn');if(b){b.textContent=svcOn?'ON':'OFF';b.style.color=svcOn?'var(--err)':'';b.style.borderColor=svcOn?'var(--err)':'';}
+}
 async function toggleRec(){recIsActive?await stopRec():await startRec();}
 async function startRec(ids){
   try{
