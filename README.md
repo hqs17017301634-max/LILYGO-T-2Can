@@ -50,20 +50,24 @@
 #### 已完成
 
 - [x] 双路 CAN 同时运行（TWAI + MCP2515）
-- [x] FSD 功能解锁（CAN 总线 1）
-- [x] 车速控制（CAN 总线 1）
+- [x] FSD 功能解锁、车速控制（CAN 总线 1）
 - [x] Web 控制面板（WiFi AP 模式）
-- [x] 维修模式开关（Web 面板控制，每 10ms 发送 0x339）
-- [x] Bus2 嗅探器（实时显示 X197 9/10 上的 CAN 帧）
+- [x] **维修模式开关**（0x339 VCSEC_serviceDiagnosticRequest，符合规格：byte5 bit7=1，点击发 4 帧 @10ms 脉冲）
+- [x] **拨杆灯光测试**：超车灯 Flash（PULL）/ 远光灯 High Beam（PUSH）—— 0x249 SCCMLeftStalk CRC 已破解（`b0 = BASE[counter] XOR OFFSET[status]`，846/846 验证）
+- [x] **爆闪 Flash Burst**：2 秒内连拉拨杆两次触发，4 档安全预设（2/3/5/7 次，2–3.3Hz）
+- [x] **Bus2 嗅探器**（实时显示 X197 9/10 上发现的 CAN ID）
+- [x] **CAN 录制器**：白名单 `?ids` / 黑名单 `?exclude` / 🔆 远光分析预设；批量写入 SPIFFS；5 万帧 PSRAM 缓冲
+- [x] **CAN1/CAN2 收发诊断**：状态栏实时显示两条总线 RX/TX/TXErr 及 MCP2515 EFLG
+- [x] **Bus2 硬件过滤开关**：让 MCP2515 只接收 0x249/0x3F5，消除 RX 溢出、降低 CPU 负载
 - [x] USB-Serial/JTAG 控制台输出
 - [x] OTA 固件在线升级
-- [x] 系统状态显示（含开发板名称 LILYGO-T-2CAN）
 
-#### 开发中
+#### 逆向研究结论
 
-- [ ] 远光灯爆闪控制（0x249 SCCMLeftStalk，需车载抓帧验证 CRC）
-- [ ] FSD 激活状态下手动远光灯功能
-- [ ] Bus2 帧录制与回放
+- **FSD 下手动远光（自适应远光强制关闭）—— 经实车逆向确认无法用共享总线注入实现。**
+  解码结果：`0x3F5 byte1 bit7` = 手动/自动模式、`0x3F5 byte3` = 远光开关与驱动来源、`0x293 byte2 bit6` = 自适应大灯使能。
+  控制大灯的 ECU 按其**内部状态**决策（FSD 会强制开启自适应），向共享总线注入 0x249/0x293 都压不过车辆内部逻辑。
+  → 若要实现需 **inline MITM（剪断 X197 9/10、双 CAN 串接改写）**，本版本暂未实现。
 
 ---
 
@@ -111,13 +115,12 @@ pio run -e lilygo_t2can_dual -t upload --upload-port COM20
 
 ### 维修模式
 
-在 Web 面板中找到 **Service Mode** 开关，开启后设备每 10ms 向 X197 Pin 9/10 发送：
+在 Web 面板中找到 **维修模式 Service Mode** 开关。按官方规格（VCSEC_serviceDiagnosticRequest，start bit 47 = byte5 bit7），每次切换发送 **4 帧、间隔 10ms** 的脉冲：
 
 ```
-ID: 0x339  DLC: 8  Data: 00 00 00 00 00 E0 00 00
+开启: ID 0x339  DLC 8  Data 00 00 00 00 00 80 00 00   (byte5 bit7 = 1)
+关闭: ID 0x339  DLC 8  Data 00 00 00 00 00 00 00 00
 ```
-
-关闭开关即停止发送。
 
 ---
 
@@ -183,20 +186,24 @@ A web dashboard is served over the onboard WiFi hotspot — no app needed, just 
 #### Completed
 
 - [x] Dual CAN simultaneous operation (TWAI + MCP2515)
-- [x] FSD unlock (CAN Bus 1)
-- [x] Speed control (CAN Bus 1)
+- [x] FSD unlock & speed control (CAN Bus 1)
 - [x] Web dashboard (WiFi AP mode)
-- [x] Service mode toggle (web panel, sends 0x339 every 10ms)
-- [x] Bus2 sniffer (live view of CAN frames on X197 Pin 9/10)
+- [x] **Service mode toggle** (0x339 VCSEC_serviceDiagnosticRequest, spec-correct: byte5 bit7=1, fires a 4-frame @10ms burst per toggle)
+- [x] **Stalk lighting test**: flash-to-pass (PULL) / high beam (PUSH) — 0x249 SCCMLeftStalk CRC reverse-engineered (`b0 = BASE[counter] XOR OFFSET[status]`, 846/846 verified)
+- [x] **Flash Burst**: double-pull the stalk within 2s to fire a configurable burst (4 safe presets: 2/3/5/7 flashes, 2–3.3 Hz)
+- [x] **Bus2 sniffer** (live list of CAN IDs discovered on X197 Pin 9/10)
+- [x] **CAN recorder**: whitelist `?ids` / blacklist `?exclude` / 🔆 high-beam preset; batched SPIFFS writes; 50k-frame PSRAM buffer
+- [x] **CAN1/CAN2 diagnostics**: per-bus RX/TX/TXErr + MCP2515 EFLG live in the status bar
+- [x] **Bus2 hardware filter toggle**: MCP2515 accepts only 0x249/0x3F5 to kill RX overflow and cut CPU load
 - [x] USB-Serial/JTAG console output
 - [x] OTA firmware updates
-- [x] System status with board name (LILYGO-T-2CAN)
 
-#### In Development
+#### Reverse-Engineering Findings
 
-- [ ] High-beam flash control (0x249 SCCMLeftStalk, pending on-vehicle CRC capture)
-- [ ] Manual high-beam activation during active FSD
-- [ ] Bus2 frame recording and playback
+- **Manual high beam during FSD (forcing adaptive high beam off) — confirmed NOT achievable via shared-bus injection.**
+  Decoded: `0x3F5 byte1 bit7` = manual/auto mode, `0x3F5 byte3` = high-beam on/off & driver, `0x293 byte2 bit6` = adaptive-high-beam enable.
+  The ECU controlling the headlights decides from its **internal state** (and FSD forces adaptive on); injecting 0x249/0x293 on the shared bus cannot override that internal logic.
+  → Achieving it would require an **inline MITM** (cut X197 9/10, rewrite in-line through two CAN interfaces). Not implemented in this version.
 
 ---
 
@@ -244,13 +251,12 @@ pio run -e lilygo_t2can_dual -t upload --upload-port COM20
 
 ### Service Mode
 
-Toggle **Service Mode** in the web dashboard. When enabled, the device sends the following frame every 10ms to X197 Pin 9/10:
+Toggle **Service Mode** in the web dashboard. Per the official spec (VCSEC_serviceDiagnosticRequest, start bit 47 = byte5 bit7), each toggle fires a **4-frame burst at 10ms spacing**:
 
 ```
-ID: 0x339  DLC: 8  Data: 00 00 00 00 00 E0 00 00
+Enable:  ID 0x339  DLC 8  Data 00 00 00 00 00 80 00 00   (byte5 bit7 = 1)
+Disable: ID 0x339  DLC 8  Data 00 00 00 00 00 00 00 00
 ```
-
-Disable the toggle to stop transmission.
 
 ---
 

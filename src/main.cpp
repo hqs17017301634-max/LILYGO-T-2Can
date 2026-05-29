@@ -94,6 +94,20 @@ static bool appTwaiGpioValid(gpio_num_t pin, bool tx)
 #ifdef DRIVER_T2CAN_DUAL
 static std::unique_ptr<ESP32_MCP2515Driver> appDriverSecondary;
 static volatile uint32_t t2canSecondaryRxCount = 0;
+static volatile uint32_t t2canSecondaryTxCount = 0;
+static volatile uint32_t t2canSecondaryTxErrCount = 0;
+static volatile uint8_t t2canSecondaryEflg = 0;
+
+// Single counted TX path for the secondary (bus B / X197 9/10) so the dashboard
+// can report CAN2 send + error totals. Every bus-B transmit goes through here.
+static bool t2canTxSecondaryCounted(const CanFrame &f)
+{
+    bool ok = appDriverSecondary->send(f);
+    t2canSecondaryTxCount = t2canSecondaryTxCount + 1;
+    if (!ok)
+        t2canSecondaryTxErrCount = t2canSecondaryTxErrCount + 1;
+    return ok;
+}
 
 static void t2canSetupSecondary()
 {
@@ -124,7 +138,7 @@ bool t2canSendSecondary(const CanFrame &frame)
         return false;
     CanFrame f = frame;
     f.bus = T2CAN_SECONDARY_BUS;
-    return appDriverSecondary->send(f);
+    return t2canTxSecondaryCounted(f);
 }
 
 // ── bus2 discovered-ID table (X197 9/10) — for serial log + dashboard /bus2_ids ──
@@ -143,13 +157,19 @@ static volatile uint16_t g_bus2IdCount = 0;
 // injected test frame can ride just after it with the next counter value.
 static volatile uint8_t g_stalkLastCounter = 0;
 
+// Forward decl — definition is alongside the stalk/burst injectors below.
+static void t2canBurstCheckTrigger(uint8_t newStatus);
+
 static void t2canRecordBus2(const CanFrame &f)
 {
     if (f.id & 0x80000000UL)
         return; // standard 11-bit IDs only (Tesla lighting/stalk are standard)
     uint16_t sid = (uint16_t)(f.id & 0x7FF);
     if (sid == 0x249 && f.dlc >= 2)
+    {
         g_stalkLastCounter = f.data[1] & 0x0F; // track real stalk counter
+        t2canBurstCheckTrigger((uint8_t)((f.data[1] >> 4) & 0x07));
+    }
     uint16_t n = g_bus2IdCount;
     for (uint16_t i = 0; i < n; i++)
     {
@@ -185,6 +205,12 @@ bool t2canBus2IdAt(uint16_t i, uint16_t *id, uint8_t *dlc, uint8_t data[8], uint
     return true;
 }
 
+// CAN2 (bus B / MCP2515) traffic counters for the dashboard status bar.
+uint32_t t2canBus2RxCount(void) { return t2canSecondaryRxCount; }
+uint32_t t2canBus2TxCount(void) { return t2canSecondaryTxCount; }
+uint32_t t2canBus2TxErrCount(void) { return t2canSecondaryTxErrCount; }
+uint8_t t2canBus2Eflg(void) { return t2canSecondaryEflg; }
+
 static void t2canDrainSecondary()
 {
     if (!appDriverSecondary)
@@ -206,29 +232,40 @@ static void t2canDrainSecondary()
     }
 }
 
-// ── Service mode (X197 pin 9/10 / bus B): periodic 0x339 injection ──
-// Owner-provided frame {00,00,00,00,00,E0,00,00}. RAM-only flag, OFF on boot;
-// injects only while explicitly enabled via the dashboard /service_mode toggle.
+// ── Service mode (BODY bus / bus B): VCSEC_serviceDiagnosticRequest 0x339 ──
+// Spec 2.4.1: send 4 frames at 10ms spacing on the BODY bus. The signal lives at
+// start bit 47 (Intel) = byte5 bit7: 1 = enter service mode, 0 = exit.
+//   activate   -> 00 00 00 00 00 80 00 00
+//   deactivate -> 00 00 00 00 00 00 00 00
+// RAM-only flag, OFF on boot; each dashboard /service_mode toggle fires one burst.
 static volatile bool g_t2canServiceMode = false;
+static volatile uint8_t g_svcBurstRemaining = 0; // frames left in the 4-frame burst
+static volatile uint8_t g_svcBurstValue = 0;     // byte5 value for this burst
 
-void t2canSetServiceMode(bool on) { g_t2canServiceMode = on; }
+void t2canSetServiceMode(bool on)
+{
+    g_t2canServiceMode = on;
+    g_svcBurstValue = on ? 0x80 : 0x00; // byte5 bit7 = serviceDiagnosticRequest
+    g_svcBurstRemaining = 4;            // spec: 4 frames @ 10ms
+}
 bool t2canGetServiceMode(void) { return g_t2canServiceMode; }
 
 static void t2canServiceModeTick()
 {
-    if (!g_t2canServiceMode || !appDriverSecondary)
+    if (g_svcBurstRemaining == 0 || !appDriverSecondary)
         return;
     static uint32_t last = 0;
     uint32_t now = millis();
-    if (now - last < 10)
+    if (now - last < 10) // 10ms interval per spec
         return;
     last = now;
     CanFrame f = {};
     f.id = 0x339;
     f.dlc = 8;
-    f.data[5] = 0xE0;
+    f.data[5] = g_svcBurstValue;
     f.bus = T2CAN_SECONDARY_BUS;
-    appDriverSecondary->send(f);
+    t2canTxSecondaryCounted(f);
+    g_svcBurstRemaining = g_svcBurstRemaining - 1;
 }
 
 // ── Stalk injection test (0x249 SCCMLeftStalk on bus B / X197 9/10) ──
@@ -279,10 +316,163 @@ static void t2canStalkInjectTick()
     f.data[2] = 0;
     f.data[3] = 0;
     f.bus = T2CAN_SECONDARY_BUS;
-    appDriverSecondary->send(f);
+    t2canTxSecondaryCounted(f);
 #ifdef ESP32_DASHBOARD
     dashRecordCanFrame(f, 'T');
 #endif
+}
+
+// ── Flash burst (双拨触发的爆闪) ──
+// Trigger: while enabled, two real-stalk PULL events (idle→1) within 2 seconds
+// fire a burst of N flashes. Each flash = PULL for onMs then idle for offMs.
+// Implemented by driving the existing stalk injector (g_stalkInjStatus=1) in a
+// timed on/off pattern so the burst rides the same 50ms cadence used elsewhere.
+static volatile bool g_burstEnabled = false;
+static volatile uint8_t g_burstCount = 3;    // flash count (1-20)
+static volatile uint16_t g_burstOnMs = 180;  // PULL duration per flash (80-1000)
+static volatile uint16_t g_burstOffMs = 180; // idle duration per flash (80-1000)
+static volatile uint32_t g_lastPullStartMs = 0;
+static volatile uint8_t g_prevStalkStatus = 0;
+static volatile uint16_t g_burstPhasesLeft = 0; // 2× count (alternating on/off)
+static volatile bool g_burstOnPhase = false;
+static volatile uint32_t g_burstPhaseEnd = 0;
+
+void t2canSetBurstEnabled(bool on)
+{
+    g_burstEnabled = on;
+    if (!on)
+    {
+        // Disabling cancels any in-flight burst and clears the trigger window.
+        g_burstPhasesLeft = 0;
+        if (g_stalkInjStatus == 1)
+            g_stalkInjStatus = 0;
+        g_lastPullStartMs = 0;
+    }
+}
+bool t2canGetBurstEnabled(void) { return g_burstEnabled; }
+
+void t2canSetBurstParams(uint8_t cnt, uint16_t onMs, uint16_t offMs)
+{
+    if (cnt < 1)
+        cnt = 1;
+    if (cnt > 20)
+        cnt = 20;
+    if (onMs < 80)
+        onMs = 80;
+    if (onMs > 1000)
+        onMs = 1000;
+    if (offMs < 80)
+        offMs = 80;
+    if (offMs > 1000)
+        offMs = 1000;
+    g_burstCount = cnt;
+    g_burstOnMs = onMs;
+    g_burstOffMs = offMs;
+}
+uint8_t t2canGetBurstCount(void) { return g_burstCount; }
+uint16_t t2canGetBurstOnMs(void) { return g_burstOnMs; }
+uint16_t t2canGetBurstOffMs(void) { return g_burstOffMs; }
+
+// Called from t2canRecordBus2 on every received 0x249 frame's status field.
+// idle→PULL transition is the "tap"; two taps within 2s fires the burst.
+static void t2canBurstCheckTrigger(uint8_t newStatus)
+{
+    bool pullStart = (g_prevStalkStatus != 1) && (newStatus == 1);
+    g_prevStalkStatus = newStatus;
+    if (!g_burstEnabled || !pullStart || g_burstPhasesLeft != 0)
+        return;
+    uint32_t now = millis();
+    if (g_lastPullStartMs != 0 && (now - g_lastPullStartMs) <= 2000)
+    {
+        // Double-tap detected → arm a burst of g_burstCount flashes.
+        g_burstPhasesLeft = (uint16_t)g_burstCount * 2;
+        g_burstOnPhase = true;
+        g_burstPhaseEnd = now + g_burstOnMs;
+        g_stalkInjStatus = 1; // PULL
+        g_stalkInjUntil = now + g_burstOnMs + 30;
+        g_lastPullStartMs = 0; // consume the pair
+    }
+    else
+    {
+        g_lastPullStartMs = now;
+    }
+}
+
+// Drives the burst phase machine. Each flash = ON phase (inject PULL) + OFF
+// phase (release). When all phases done, clear the injector.
+static void t2canBurstTick()
+{
+    if (g_burstPhasesLeft == 0)
+        return;
+    uint32_t now = millis();
+    if ((int32_t)(now - g_burstPhaseEnd) < 0)
+        return; // current phase still running
+    g_burstPhasesLeft = g_burstPhasesLeft - 1;
+    if (g_burstPhasesLeft == 0)
+    {
+        g_stalkInjStatus = 0;
+        return;
+    }
+    g_burstOnPhase = !g_burstOnPhase;
+    if (g_burstOnPhase)
+    {
+        g_stalkInjStatus = 1;
+        g_stalkInjUntil = now + g_burstOnMs + 30;
+        g_burstPhaseEnd = now + g_burstOnMs;
+    }
+    else
+    {
+        g_stalkInjStatus = 0;
+        g_burstPhaseEnd = now + g_burstOffMs;
+    }
+}
+
+// Periodically cache the MCP2515 error flags from inside the CAN task (the same
+// task that owns the SPI bus, so no contention) so the dashboard can show CAN2
+// bus health (bus-off / TX-error-passive => bad wiring/termination/arbitration).
+static void t2canBus2HealthTick()
+{
+    if (!appDriverSecondary)
+        return;
+    static uint32_t last = 0;
+    uint32_t now = millis();
+    if (now - last < 500)
+        return;
+    last = now;
+    t2canSecondaryEflg = appDriverSecondary->mcp().getErrorFlags();
+}
+
+// ── Bus2 acquisition filter ──
+// Default = accept-all (needed for the sniffer / recorder discovery work).
+// When enabled, narrow the MCP2515 hardware acceptance filters to only the IDs
+// the lighting logic consumes (0x249 stalk, 0x3F5 lighting) so the chip drops
+// everything else at the hardware level — eliminates RX overflow on a busy bus
+// and cuts SPI/CPU load during normal operation. Applied from the CAN task to
+// avoid SPI contention.
+static const uint32_t kBus2FilterIds[] = {0x249, 0x3F5};
+static volatile bool g_bus2FilterMode = false;    // requested (false=all)
+static volatile bool g_bus2FilterApplied = false; // currently applied
+
+void t2canSetBus2Filter(bool on) { g_bus2FilterMode = on; }
+bool t2canGetBus2Filter(void) { return g_bus2FilterMode; }
+
+static void t2canBus2FilterTick()
+{
+    if (!appDriverSecondary || g_bus2FilterMode == g_bus2FilterApplied)
+        return;
+    if (g_bus2FilterMode)
+    {
+        appDriverSecondary->setFilters(kBus2FilterIds,
+                                       sizeof(kBus2FilterIds) / sizeof(kBus2FilterIds[0]));
+        appDriverSecondary->mcp().setUseFiltersMode();
+        Serial.println("bus2 filter: only 0x249/0x3F5");
+    }
+    else
+    {
+        appDriverSecondary->mcp().setReceiveAllMode();
+        Serial.println("bus2 filter: accept-all");
+    }
+    g_bus2FilterApplied = g_bus2FilterMode;
 }
 #endif
 
@@ -379,7 +569,10 @@ static void app_can_task(void *)
 #ifdef DRIVER_T2CAN_DUAL
         t2canDrainSecondary();
         t2canServiceModeTick();
+        t2canBurstTick();          // drives the multi-flash burst phase machine
         t2canStalkInjectTick();
+        t2canBus2HealthTick();
+        t2canBus2FilterTick();     // apply pending accept-all/filtered switch
 #endif
         appCanTaskLoops = appCanTaskLoops + 1;
         if (!processed)

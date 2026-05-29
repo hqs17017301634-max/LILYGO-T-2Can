@@ -295,9 +295,13 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
   <div class="stat"><div class="stat-lbl">CAN Bus</div><div class="stat-val" id="s-can">Offline</div></div>
   <div class="stat"><div class="stat-lbl">FSD Switch</div><div class="stat-val v-dim" id="s-inj">--</div></div>
   <div class="stat"><div class="stat-lbl" title="Frames received per second">CAN Frame Rate</div><div class="stat-val v-dim" id="s-fps">0.0 Hz</div></div>
-  <div class="stat"><div class="stat-lbl">RX</div><div class="stat-val v-acc" id="s-rx">0</div></div>
-  <div class="stat"><div class="stat-lbl">TX</div><div class="stat-val v-acc" id="s-tx">0</div></div>
-  <div class="stat"><div class="stat-lbl">TX Errors</div><div class="stat-val v-dim" id="s-txerr">0</div></div>
+  <div class="stat" title="CAN1 = TWAI / X197 pin 13/14 (FSD)"><div class="stat-lbl">CAN1 RX</div><div class="stat-val v-acc" id="s-rx">0</div></div>
+  <div class="stat" title="CAN1 = TWAI / X197 pin 13/14 (FSD)"><div class="stat-lbl">CAN1 TX</div><div class="stat-val v-acc" id="s-tx">0</div></div>
+  <div class="stat" title="CAN1 TX failures (no ACK = bus not connected)"><div class="stat-lbl">CAN1 TXErr</div><div class="stat-val v-dim" id="s-txerr">0</div></div>
+  <div class="stat" id="c2rx-cell" title="CAN2 = MCP2515 / X197 pin 9/10 (lighting/stalk)"><div class="stat-lbl">CAN2 RX</div><div class="stat-val v-acc" id="s-rx2">0</div></div>
+  <div class="stat" id="c2tx-cell" title="CAN2 = MCP2515 / X197 pin 9/10 (lighting/stalk)"><div class="stat-lbl">CAN2 TX</div><div class="stat-val v-acc" id="s-tx2">0</div></div>
+  <div class="stat" id="c2err-cell" title="CAN2 TX failures (no ACK / arbitration loss)"><div class="stat-lbl">CAN2 TXErr</div><div class="stat-val v-dim" id="s-txerr2">0</div></div>
+  <div class="stat" id="c2eflg-cell" title="MCP2515 error flags: nonzero = bus error/off (check 9/10 wiring + 120R termination)"><div class="stat-lbl">CAN2 EFLG</div><div class="stat-val v-dim" id="s-eflg2">0x00</div></div>
   <div class="stat"><div class="stat-lbl">Follow dist</div><div class="stat-val v-dim" id="s-fd">--</div></div>
   <div class="stat"><div class="stat-lbl">Profile</div><div class="stat-val v-dim" id="s-prof">--</div></div>
   <div class="stat"><div class="stat-lbl">Limit Offset</div><div class="stat-val v-dim" id="s-soff">0</div></div>
@@ -384,6 +388,23 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
   <div class="sniff-ctrl" style="margin-top:8px;align-items:center">
     <span style="font-size:12px;color:var(--tx2)">维修模式 Service Mode (0x339)</span>
     <button class="sniff-btn" id="svc-btn" onclick="toggleServiceMode()">OFF</button>
+  </div>
+  <div class="sniff-ctrl" style="margin-top:8px;align-items:center" title="正常运行时让 MCP2515 硬件只接收灯光逻辑需要的 ID(0x249 拨杆 / 0x3F5 灯态),其余帧芯片直接丢弃 —— 消除 RX 溢出、降低负载。⚠️ 开启后 Bus2 嗅探器/录制只能看到这两个 ID;要全量抓包(如找设置信号)请先关掉。">
+    <span style="font-size:12px;color:var(--tx2)">Bus2 仅采集所需 (0x249/0x3F5)</span>
+    <button class="sniff-btn" id="bus2-filter-btn" onclick="toggleBus2Filter()">OFF</button>
+  </div>
+  <div style="margin-top:10px;border-top:1px solid var(--bd2);padding-top:8px">
+    <div class="sniff-ctrl" style="align-items:center" title="启用后，2 秒内连续拉两下超车灯拨杆 (PULL×2) 即触发预设的爆闪。先选预设再开开关。">
+      <span style="font-size:12px;color:var(--tx2)">💥 爆闪 Flash Burst (PULL×2 trigger)</span>
+      <button class="sniff-btn" id="burst-en-btn" onclick="toggleBurst()">OFF</button>
+    </div>
+    <div class="sniff-ctrl" style="margin-top:6px;flex-wrap:wrap;gap:6px">
+      <button class="sniff-btn" id="bp-A" onclick="setBurstPreset('A')" title="2 次,亮 250ms / 灭 250ms (2 Hz) — 致意 / 让车">A 礼貌闪</button>
+      <button class="sniff-btn" id="bp-B" onclick="setBurstPreset('B')" title="3 次,亮 180ms / 灭 180ms (2.8 Hz) — 提醒前车">B 提醒闪</button>
+      <button class="sniff-btn" id="bp-C" onclick="setBurstPreset('C')" title="5 次,亮 150ms / 灭 150ms (3.3 Hz) — 紧急警示">C 爆闪</button>
+      <button class="sniff-btn" id="bp-D" onclick="setBurstPreset('D')" title="7 次,亮 200ms / 灭 200ms (2.5 Hz) — 持续警告">D 长爆闪</button>
+    </div>
+    <div style="margin-top:6px;font-size:11px;color:var(--tx3)" id="burst-params">当前: --</div>
   </div>
 </div>
 
@@ -833,9 +854,16 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
         <span id="rec-count">0 / -- frames</span>
         <span id="rec-status">Ready</span>
       </div>
+      <div class="sniff-ctrl" style="align-items:center;gap:6px;margin-bottom:6px" title="全量录制时要排除的高频噪声帧 ID（十六进制,逗号分隔）。例如 0x118 约占全部帧的 80%,排除后小缓冲也能录很久。留空=全收。仅对下面的 Start Recording 生效,不影响 🔆 预设。">
+        <span style="font-size:11px;color:var(--tx3);white-space:nowrap">排除 ID</span>
+        <input class="sniff-input" id="rec-exclude" placeholder="如 118,3FD（留空=全收）" value="118" style="flex:1">
+      </div>
       <div class="btn-row">
         <button class="btn" id="rec-btn" onclick="toggleRec()">Start Recording</button>
         <a class="btn" id="rec-dl" href="/rec_download" download="can_recording.csv" style="display:none;text-align:center;text-decoration:none;padding:10px;border:1px solid var(--bd2);color:var(--tx2)">Download CSV</a>
+      </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn" id="rec-hb-btn" onclick="toggleHbRec()" title="远光分析预设：仅抓 0x3F5 灯态 / 0x249 拨杆 / 0x3E9 DAS体控 / 0x399·0x3F8 FSD状态 / 0x118·0x3FD·0x39B·0x3D8 邻近车身帧。一键启停，控制每次抓包数据量。两条总线都会录。">🔆 远光分析录制 (preset)</button>
       </div>
     </div>
   </div>
@@ -905,7 +933,7 @@ body:not(.can-debug-on) .can-debug-panel{display:none !important}
 <span class="ok">&#x2705;</span> &#x81EA;&#x5B9A;&#x4E49;&#x9650;&#x901F;
 
 Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-24 23:21:43 +08:00</div>
+OTA timestamp: 2026-05-28 23:47:46 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOwnerNotice()">&#x77E5;&#x9053;&#x4E86;</button>
     </div>
@@ -927,7 +955,7 @@ OTA timestamp: 2026-05-24 23:21:43 +08:00</div>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ota-test-title">
     <div class="modal-title" id="ota-test-title">OTA Test v2</div>
     <div class="modal-msg" id="ota-test-msg">Version: 3.0.0-beta.5
-OTA timestamp: 2026-05-24 23:21:43 +08:00</div>
+OTA timestamp: 2026-05-28 23:47:46 +08:00</div>
     <div class="modal-actions">
       <button class="sniff-btn modal-btn-primary" onclick="closeOtaTestNotice()">Close</button>
     </div>
@@ -1225,7 +1253,7 @@ Object.assign(I18N_ZH,{
   '80/100/120 km/h buckets. Max target: 120/150/155 km/h.':'80/100/120 km/h \u5206\u6bb5\u3002\u76ee\u6807\u4e0a\u9650\uff1a120/150/155 km/h\u3002',
   'Profiles are available on Legacy, HW3 and HW4.':'Legacy\u3001HW3 \u548c HW4 \u652f\u6301\u914d\u7f6e\u6863\u3002',
   'OTA Test v2':'OTA \u6d4b\u8bd5 v2',
-  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-24 23:21:43 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-24 23:21:43 +08:00',
+  'Version: 3.0.0-beta.5\nOTA timestamp: 2026-05-28 23:47:46 +08:00':'\u7248\u672c\uff1a3.0.0-beta.5\nOTA \u65f6\u95f4\uff1a2026-05-28 23:47:46 +08:00',
   'AP':'AP',
   'STA':'STA',
   'DNS':'DNS',
@@ -2510,6 +2538,34 @@ async function poll(){
     setText('s-tx',d.tx);
     setText('s-txerr',d.txerr);
     setClass('s-txerr','stat-val '+(d.txerr>0?'v-warn':'v-dim'));
+    const c2=d.can2,showC2=!!c2;
+    ['c2rx-cell','c2tx-cell','c2err-cell','c2eflg-cell'].forEach(id=>{const e=$(id);if(e)e.style.display=showC2?'':'none';});
+    if(showC2){
+      setText('s-rx2',c2.rx);
+      setClass('s-rx2','stat-val '+(c2.rx>0?'v-acc':'v-err'));
+      setText('s-tx2',c2.tx);
+      setText('s-txerr2',c2.txerr);
+      setClass('s-txerr2','stat-val '+(c2.txerr>0?'v-warn':'v-dim'));
+      setText('s-eflg2','0x'+toHex(c2.eflg,2));
+      setClass('s-eflg2','stat-val '+(c2.eflg>0?'v-err':'v-dim'));
+      // Sync bus2 filter button.
+      if(typeof c2.filter==='boolean' && c2.filter!==bus2FilterOn){
+        bus2FilterOn=c2.filter;
+        const b=$('bus2-filter-btn');if(b){b.textContent=bus2FilterOn?'ON':'OFF';b.style.color=bus2FilterOn?'var(--acc)':'';b.style.borderColor=bus2FilterOn?'var(--acc)':'';}
+      }
+      // Sync burst card from firmware-side state.
+      if(c2.burst){
+        const changed=(c2.burst.en!==burstEnabled)||
+                      (c2.burst.cnt!==burstParams.count)||
+                      (c2.burst.on!==burstParams.on)||
+                      (c2.burst.off!==burstParams.off);
+        if(changed){
+          burstEnabled=!!c2.burst.en;
+          burstParams={count:c2.burst.cnt,on:c2.burst.on,off:c2.burst.off};
+          updateBurstUI();
+        }
+      }
+    }
     setText('s-fd',d.fd||'--');
     setText('s-prof',profileDisplayName(d.hw,state.sp,state.spAuto));
     setText('s-soff',d.soff||'0');
@@ -2577,14 +2633,96 @@ async function toggleServiceMode(){
   try{const r=await(await fetch('/service_mode?on='+(svcOn?1:0))).json();svcOn=!!r.service_mode;}catch(e){}
   const b=$('svc-btn');if(b){b.textContent=svcOn?'ON':'OFF';b.style.color=svcOn?'var(--err)':'';b.style.borderColor=svcOn?'var(--err)':'';}
 }
-async function toggleRec(){recIsActive?await stopRec():await startRec();}
-async function startRec(ids){
+let bus2FilterOn=false;
+async function toggleBus2Filter(){
+  bus2FilterOn=!bus2FilterOn;
+  try{const r=await(await fetch('/bus2_filter?on='+(bus2FilterOn?1:0))).json();bus2FilterOn=!!r.bus2_filter;}catch(e){}
+  const b=$('bus2-filter-btn');if(b){b.textContent=bus2FilterOn?'ON':'OFF';b.style.color=bus2FilterOn?'var(--acc)':'';b.style.borderColor=bus2FilterOn?'var(--acc)':'';}
+}
+// 💥 Flash Burst presets — 4 safe combinations (count, on_ms, off_ms).
+const BURST_PRESETS={
+  A:{count:2,on:250,off:250,name:'A 礼貌闪',hz:'2.0Hz'},
+  B:{count:3,on:180,off:180,name:'B 提醒闪',hz:'2.8Hz'},
+  C:{count:5,on:150,off:150,name:'C 爆闪',hz:'3.3Hz'},
+  D:{count:7,on:200,off:200,name:'D 长爆闪',hz:'2.5Hz'}
+};
+let burstEnabled=false, burstParams={count:3,on:180,off:180};
+function burstPresetId(){
+  for(const k of Object.keys(BURST_PRESETS)){
+    const p=BURST_PRESETS[k];
+    if(p.count===burstParams.count&&p.on===burstParams.on&&p.off===burstParams.off) return k;
+  }
+  return null;
+}
+function updateBurstUI(){
+  const b=$('burst-en-btn');
+  if(b){b.textContent=burstEnabled?'ON':'OFF';b.style.color=burstEnabled?'var(--err)':'';b.style.borderColor=burstEnabled?'var(--err)':'';}
+  const sel=burstPresetId();
+  ['A','B','C','D'].forEach(k=>{const e=$('bp-'+k);if(e){e.style.borderColor=(k===sel)?'var(--acc)':'';e.style.color=(k===sel)?'var(--acc)':'';}});
+  const pe=$('burst-params');
+  if(pe){
+    const tag=sel?BURST_PRESETS[sel].name+' ('+BURST_PRESETS[sel].hz+')':'自定义';
+    pe.textContent='当前: '+tag+' — '+burstParams.count+' 次,亮 '+burstParams.on+'ms / 灭 '+burstParams.off+'ms'+(burstEnabled?'  · 已武装,拉拨杆×2 触发':'');
+  }
+}
+async function toggleBurst(){
+  burstEnabled=!burstEnabled;
+  try{const r=await(await fetch('/burst?on='+(burstEnabled?1:0))).json();burstEnabled=!!r.enabled;
+    if(typeof r.count!=='undefined')burstParams={count:r.count,on:r.on_ms,off:r.off_ms};}catch(e){}
+  updateBurstUI();
+}
+async function setBurstPreset(id){
+  const p=BURST_PRESETS[id];if(!p)return;
+  burstParams={count:p.count,on:p.on,off:p.off};
+  try{const r=await(await fetch('/burst?count='+p.count+'&on_ms='+p.on+'&off_ms='+p.off)).json();
+    if(typeof r.count!=='undefined')burstParams={count:r.count,on:r.on_ms,off:r.off_ms};
+    burstEnabled=!!r.enabled;}catch(e){}
+  updateBurstUI();
+}
+// Highbeam-analysis preset: 9 IDs covering light feedback, stalk, DAS body
+// controls, DAS HB decision, FSD-active, plus DI/body context. Both buses are
+// recorded; filter matches by ID only. Only ONE recording session exists at the
+// firmware level — the two start buttons share it. When one is active, the
+// other goes grey/disabled so it's obvious which preset started the capture.
+const HB_PRESET_IDS='3F5,249,3E9,399,3F8,118,3FD,39B,3D8';
+let recUsesPreset=false;
+function setRecBtns(active){
+  const m=$('rec-btn'), h=$('rec-hb-btn');
+  if(m){
+    if(active && recUsesPreset){
+      m.textContent='Recording (preset)…'; m.disabled=true;
+      m.style.opacity='0.45'; m.style.color='var(--tx3)'; m.style.borderColor='';
+    } else if(active){
+      m.textContent='Stop Recording'; m.disabled=false;
+      m.style.opacity=''; m.style.color='var(--err)'; m.style.borderColor='var(--err)';
+    } else {
+      m.textContent='Start Recording'; m.disabled=false;
+      m.style.opacity=''; m.style.color=''; m.style.borderColor='';
+    }
+  }
+  if(h){
+    if(active && recUsesPreset){
+      h.textContent='■ 停止远光分析录制'; h.disabled=false;
+      h.style.opacity=''; h.style.color='var(--err)'; h.style.borderColor='var(--err)';
+    } else if(active){
+      h.textContent='🔆 远光分析录制 (普通录制中)'; h.disabled=true;
+      h.style.opacity='0.45'; h.style.color='var(--tx3)'; h.style.borderColor='';
+    } else {
+      h.textContent='🔆 远光分析录制 (preset)'; h.disabled=false;
+      h.style.opacity=''; h.style.color=''; h.style.borderColor='';
+    }
+  }
+}
+async function toggleRec(){if(recIsActive){await stopRec();}else{recUsesPreset=false;const ex=$('rec-exclude')?$('rec-exclude').value.trim():'';await startRec(null,ex);}}
+async function toggleHbRec(){if(recIsActive){await stopRec();}else{recUsesPreset=true;await startRec(HB_PRESET_IDS);}}
+async function startRec(ids,exclude){
+  const q=[];
+  if(ids)q.push('ids='+encodeURIComponent(ids));
+  if(exclude)q.push('exclude='+encodeURIComponent(exclude));
   try{
-    await fetch('/rec_start'+(ids?('?ids='+encodeURIComponent(ids)):''),{method:'POST'});
+    await fetch('/rec_start'+(q.length?('?'+q.join('&')):''),{method:'POST'});
     recIsActive=true;
-    const b=$('rec-btn');
-    b.textContent='Stop Recording';
-    b.style.borderColor='var(--err)';b.style.color='var(--err)';
+    setRecBtns(true);
     $('rec-dl').style.display='none';
     recInterval=setInterval(pollRec,800);
   }catch(e){}
@@ -2592,8 +2730,7 @@ async function startRec(ids){
 async function stopRec(){
   clearInterval(recInterval);recIsActive=false;
   try{await fetch('/rec_stop',{method:'POST'});}catch(e){}
-  const b=$('rec-btn');
-  b.textContent='Start Recording';b.style.borderColor='';b.style.color='';
+  setRecBtns(false);
   await pollRec();
 }
 async function pollRec(){
@@ -2611,7 +2748,7 @@ async function pollRec(){
       $('rec-status').textContent=d.saved?'Saved':'Ready';
       $('rec-status').style.color=d.saved?'var(--ok)':'';
       $('rec-dl').style.display=d.saved?'':'none';
-      if(recIsActive){recIsActive=false;clearInterval(recInterval);const b=$('rec-btn');b.textContent='Start Recording';b.style.borderColor='';b.style.color='';}
+      if(recIsActive){recIsActive=false;clearInterval(recInterval);setRecBtns(false);}
     }
   }catch(e){}
 }

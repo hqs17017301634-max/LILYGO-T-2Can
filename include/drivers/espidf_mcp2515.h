@@ -160,6 +160,14 @@ public:
         bitModify(MCP_RXB1CTRL, RXBnCTRL_RXM_MASK, RXBnCTRL_RXM_MASK);
     }
 
+    // RXM = 0b00: enable acceptance filters/masks so only matching IDs are
+    // received (counterpart to setReceiveAllMode). Call after setFilters().
+    void setUseFiltersMode()
+    {
+        bitModify(MCP_RXB0CTRL, RXBnCTRL_RXM_MASK, RXBnCTRL_RXM_STDEXT);
+        bitModify(MCP_RXB1CTRL, RXBnCTRL_RXM_MASK, RXBnCTRL_RXM_STDEXT);
+    }
+
 private:
     static constexpr uint8_t INSTRUCTION_WRITE = 0x02;
     static constexpr uint8_t INSTRUCTION_READ = 0x03;
@@ -238,7 +246,7 @@ private:
         bus.quadhd_io_num = -1;
         spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO);
         spi_device_interface_config_t dev = {};
-        dev.clock_speed_hz = 8000000;
+        dev.clock_speed_hz = 10000000; // 10MHz (matches LILYGO factory example; faster SPI = less CPU per drain)
         dev.mode = 0;
         dev.spics_io_num = csPin_;
         dev.queue_size = 1;

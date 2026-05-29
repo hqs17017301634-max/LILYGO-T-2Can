@@ -250,6 +250,12 @@ static unsigned long recStartMs = 0;
 static constexpr int kRecFilterMax = 16;
 static uint32_t recFilterIds[kRecFilterMax];
 static int recFilterCount = 0;
+// Optional exclude filter (blacklist): when recExcludeCount > 0, frames whose ID
+// is listed are NOT recorded. Lets a broad capture drop the high-rate noise (e.g.
+// 0x118 ≈ 80% of frames) so the buffer holds a much longer useful window. Applied
+// after the include filter; a frame must pass both to be recorded.
+static uint32_t recExcludeIds[kRecFilterMax];
+static int recExcludeCount = 0;
 
 // CAN sniffer ring buffer
 #define SNIFFER_CAP 30
@@ -421,7 +427,16 @@ static bool dashSaveRecordingToSpiffs(int n)
     }
 
     // bus: 2 = secondary MCP2515 (X197 9/10), 1 = primary TWAI (X197 13/14)
-    f.println("ts_ms,dir,bus,id,dlc,b0,b1,b2,b3,b4,b5,b6,b7");
+    // Batch lines into an 8 KB buffer and flush in big chunks — one f.write per
+    // ~200 frames instead of per frame, cutting SPIFFS call overhead ~200x.
+    static char chunk[8192]; // not reentrant; only one save runs at a time
+    size_t pos = 0;
+    {
+        const char *hdr = "ts_ms,dir,bus,id,dlc,b0,b1,b2,b3,b4,b5,b6,b7\n";
+        size_t hlen = strlen(hdr);
+        memcpy(chunk, hdr, hlen);
+        pos = hlen;
+    }
     char line[96];
     for (int i = 0; i < n; i++)
     {
@@ -440,10 +455,20 @@ static bool dashSaveRecordingToSpiffs(int n)
                            static_cast<unsigned>(recBuf[i].data[5]),
                            static_cast<unsigned>(recBuf[i].data[6]),
                            static_cast<unsigned>(recBuf[i].data[7]));
-        if (len > 0)
-            f.write(reinterpret_cast<const uint8_t *>(line),
-                    static_cast<size_t>(len < static_cast<int>(sizeof(line)) ? len : sizeof(line) - 1));
+        if (len <= 0)
+            continue;
+        if (len > static_cast<int>(sizeof(line) - 1))
+            len = sizeof(line) - 1;
+        if (pos + static_cast<size_t>(len) > sizeof(chunk))
+        {
+            f.write(reinterpret_cast<const uint8_t *>(chunk), pos);
+            pos = 0;
+        }
+        memcpy(chunk + pos, line, static_cast<size_t>(len));
+        pos += static_cast<size_t>(len);
     }
+    if (pos > 0)
+        f.write(reinterpret_cast<const uint8_t *>(chunk), pos);
     f.close();
     recSaved = true;
     dashLog("[REC] Saved " + String(n) + " frames to SPIFFS");
@@ -466,10 +491,10 @@ static void dashRecordCanFrame(const CanFrame &f, char dir)
 {
     if (!recActive || !recBuf)
         return;
+    uint32_t fid = f.id & 0x1FFFFFFFUL;
     if (recFilterCount > 0)
     {
         bool match = false;
-        uint32_t fid = f.id & 0x1FFFFFFFUL;
         for (int k = 0; k < recFilterCount; k++)
         {
             if (recFilterIds[k] == fid)
@@ -480,6 +505,14 @@ static void dashRecordCanFrame(const CanFrame &f, char dir)
         }
         if (!match)
             return;
+    }
+    if (recExcludeCount > 0)
+    {
+        for (int k = 0; k < recExcludeCount; k++)
+        {
+            if (recExcludeIds[k] == fid)
+                return; // blacklisted ID — skip
+        }
     }
     int idx = recCount;
     if (idx >= REC_CAP)
@@ -1348,6 +1381,22 @@ static void handleRoot()
 #endif
 }
 
+#ifdef DRIVER_T2CAN_DUAL
+// CAN2 (bus B / MCP2515, X197 pin 9/10) traffic counters — defined in main.cpp.
+uint32_t t2canBus2RxCount(void);
+uint32_t t2canBus2TxCount(void);
+uint32_t t2canBus2TxErrCount(void);
+uint8_t t2canBus2Eflg(void);
+void t2canSetBurstEnabled(bool on);
+bool t2canGetBurstEnabled(void);
+void t2canSetBurstParams(uint8_t cnt, uint16_t onMs, uint16_t offMs);
+uint8_t t2canGetBurstCount(void);
+uint16_t t2canGetBurstOnMs(void);
+uint16_t t2canGetBurstOffMs(void);
+void t2canSetBus2Filter(bool on); // true = MCP2515 HW-filter to only 0x249/0x3F5
+bool t2canGetBus2Filter(void);
+#endif
+
 static void handleStatus()
 {
     if (canOnline && millis() - lastFrameMs > 10000)
@@ -1528,7 +1577,29 @@ static void handleStatus()
              ",\"tx\":" + String(muxTx[i]) +
              ",\"err\":" + String(muxErr[i]) + "}";
     }
-    j += "]}";
+    j += "]";
+#ifdef DRIVER_T2CAN_DUAL
+    j += ",\"can2\":{\"rx\":";
+    j += t2canBus2RxCount();
+    j += ",\"tx\":";
+    j += t2canBus2TxCount();
+    j += ",\"txerr\":";
+    j += t2canBus2TxErrCount();
+    j += ",\"eflg\":";
+    j += t2canBus2Eflg();
+    j += ",\"filter\":";
+    j += t2canGetBus2Filter() ? "true" : "false";
+    j += ",\"burst\":{\"en\":";
+    j += t2canGetBurstEnabled() ? "true" : "false";
+    j += ",\"cnt\":";
+    j += t2canGetBurstCount();
+    j += ",\"on\":";
+    j += t2canGetBurstOnMs();
+    j += ",\"off\":";
+    j += t2canGetBurstOffMs();
+    j += "}}";
+#endif
+    j += "}";
     server.send(200, "application/json", j);
 }
 
@@ -1819,13 +1890,34 @@ static void handleRecStart()
             p = end;
         }
     }
+    // Optional exclude/blacklist: /rec_start?exclude=118,3FD (hex, comma-sep).
+    // Frames with these IDs are dropped — broad capture without the noisy frames.
+    recExcludeCount = 0;
+    if (server.hasArg("exclude"))
+    {
+        String s = server.arg("exclude");
+        const char *p = s.c_str();
+        while (*p && recExcludeCount < kRecFilterMax)
+        {
+            while (*p == ',' || *p == ' ')
+                p++;
+            if (!*p)
+                break;
+            char *end = nullptr;
+            uint32_t v = static_cast<uint32_t>(strtoul(p, &end, 16));
+            if (end == p)
+                break;
+            recExcludeIds[recExcludeCount++] = v;
+            p = end;
+        }
+    }
     recCount = 0;
     recSaved = false;
     recStartMs = millis();
     recActive = true;
-    dashLog(recFilterCount > 0
-                ? String("[REC] Recording started (filter ") + recFilterCount + " ids)"
-                : String("[REC] Recording started"));
+    dashLog(String("[REC] Recording started")
+            + (recFilterCount > 0 ? String(" (filter ") + recFilterCount + " ids)" : String())
+            + (recExcludeCount > 0 ? String(" (exclude ") + recExcludeCount + " ids)" : String()));
     server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -1870,6 +1962,44 @@ static void handleServiceMode()
         t2canSetServiceMode(server.arg("on") == "1");
     server.send(200, "application/json",
                 String("{\"service_mode\":") + (t2canGetServiceMode() ? "true" : "false") + "}");
+}
+
+// Flash-burst trigger (爆闪): two real stalk PULL events within 2s fire a
+// configured pattern of N PULL flashes. Accepts ?on=0/1 and/or
+// ?count=N&on_ms=X&off_ms=Y. Limits enforced firmware-side (count 1-20,
+// on/off 80-1000ms). Returns the latched enable + current params.
+static void handleBurst()
+{
+    if (server.hasArg("on"))
+        t2canSetBurstEnabled(server.arg("on") == "1");
+    if (server.hasArg("count") && server.hasArg("on_ms") && server.hasArg("off_ms"))
+    {
+        uint8_t cnt = (uint8_t)server.arg("count").toInt();
+        uint16_t onMs = (uint16_t)server.arg("on_ms").toInt();
+        uint16_t offMs = (uint16_t)server.arg("off_ms").toInt();
+        t2canSetBurstParams(cnt, onMs, offMs);
+    }
+    String j = "{\"enabled\":";
+    j += t2canGetBurstEnabled() ? "true" : "false";
+    j += ",\"count\":";
+    j += t2canGetBurstCount();
+    j += ",\"on_ms\":";
+    j += t2canGetBurstOnMs();
+    j += ",\"off_ms\":";
+    j += t2canGetBurstOffMs();
+    j += "}";
+    server.send(200, "application/json", j);
+}
+
+// Bus2 acquisition filter: ?on=1 narrows the MCP2515 hardware filters to only
+// the IDs the lighting logic uses (0x249/0x3F5); ?on=0 = accept-all (default,
+// for sniffer/recorder discovery). Returns the latched state.
+static void handleBus2Filter()
+{
+    if (server.hasArg("on"))
+        t2canSetBus2Filter(server.arg("on") == "1");
+    server.send(200, "application/json",
+                String("{\"bus2_filter\":") + (t2canGetBus2Filter() ? "true" : "false") + "}");
 }
 
 // Inject a short 0x249 stalk burst on bus B to test manual lighting:
@@ -4411,6 +4541,8 @@ static void mcpDashboardSetup(CarManagerBase *handler, CanDriver *driver)
     server.on("/rec_status", HTTP_GET, handleRecStatus);
 #ifdef DRIVER_T2CAN_DUAL
     server.on("/service_mode", HTTP_GET, handleServiceMode);
+    server.on("/burst", HTTP_GET, handleBurst);
+    server.on("/bus2_filter", HTTP_GET, handleBus2Filter);
     server.on("/stalk_test", HTTP_GET, handleStalkTest);
     server.on("/bus2_ids", HTTP_GET, handleBus2Ids);
 #endif
