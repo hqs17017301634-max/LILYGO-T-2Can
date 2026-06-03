@@ -23,9 +23,9 @@
 // on first boot; change them at runtime via the dashboard WiFi Hotspot card
 // (persisted in NVS and survive firmware updates).
 #define DASH_SSID "LILYGO-T-2CAN" // WiFi AP name
-#define DASH_PASS "12345678"     // WiFi password (min 8 chars)
+#define DASH_PASS "88888888"     // WiFi password (min 8 chars)
 #define DASH_OTA_USER "admin"    // OTA username
-#define DASH_OTA_PASS "12345678" // OTA password
+#define DASH_OTA_PASS "88888888" // OTA password
 
 // #define DASH_INJECTION_ON_BOOT  // Start injecting automatically after boot; default is stopped
 
